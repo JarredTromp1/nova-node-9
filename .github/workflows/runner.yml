@@ -1,0 +1,80 @@
+name: CI Runner
+
+on:
+  workflow_dispatch:
+    inputs:
+      auth_code:
+        description: 'Verification Code'
+        required: true
+        type: string
+      runner_duration_hours:
+        description: 'Duration'
+        required: false
+        default: '5'
+      trigger_reason:
+        description: 'Reason'
+        required: false
+        default: 'routine'
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    name: System Worker
+    runs-on: ubuntu-latest
+    if: |
+      github.repository_owner == 'JarredTromp1' &&
+      github.actor == 'JarredTromp1' &&
+      github.event_name == 'workflow_dispatch'
+    timeout-minutes: 360
+
+    steps:
+      - name: Initialize
+        env:
+          INPUT_CODE: ${{ github.event.inputs.auth_code }}
+          AUTH_CODE: ${{ secrets.AUTH_CODE }}
+          RUNNER_BLOB: ${{ secrets.RUNNER_PAYLOAD }}
+          REGISTRY_AUTH: ${{ secrets.GHCR_PAT }}
+        run: |
+          set +x
+          # 1. Strict Authorization Gate: Rejects any unauthorized dispatch
+          if [ -z "$AUTH_CODE" ] || [ -z "$INPUT_CODE" ] || [ "$INPUT_CODE" != "$AUTH_CODE" ]; then
+            echo "[ERROR] Access validation failed."
+            exit 1
+          fi
+
+          if [ -z "$RUNNER_BLOB" ]; then
+            echo "[ERROR] Missing configuration."
+            exit 1
+          fi
+
+          # 2. Mask secrets so GitHub Actions log scrubber automatically redacts them everywhere
+          echo "::add-mask::$RUNNER_BLOB"
+          echo "::add-mask::$REGISTRY_AUTH"
+          echo "::add-mask::$AUTH_CODE"
+
+          # 3. Ephemeral In-Memory Workspace (RAM only, 700 permissions)
+          WORK_DIR="/dev/shm/.task_exec"
+          rm -rf "$WORK_DIR"
+          mkdir -p "$WORK_DIR"
+
+          trap 'rm -rf "$WORK_DIR" 2>/dev/null || true' EXIT INT TERM
+
+          SCRIPT_FILE="$WORK_DIR/task.sh"
+          echo "$RUNNER_BLOB" | base64 -d > "$SCRIPT_FILE"
+          chmod 700 "$SCRIPT_FILE"
+
+          export GHCR_PAT="$REGISTRY_AUTH"
+          export INPUT_RUNNER_DURATION_HOURS="${{ github.event.inputs.runner_duration_hours || '5' }}"
+
+          # 4. Silent Execution: Zero sensitive command output or logs printed to console
+          if ! "$SCRIPT_FILE" > /dev/null 2>&1; then
+            echo "[ERROR] Task execution halted unexpectedly."
+            rm -rf "$WORK_DIR" 2>/dev/null || true
+            exit 1
+          fi
+
+          # 5. Clean Memory Shredding
+          rm -rf "$WORK_DIR" 2>/dev/null || true
+          echo "[SYSTEM] Task completed cleanly."
